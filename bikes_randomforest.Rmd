@@ -1,0 +1,219 @@
+---
+title: "Purchased bikes classification"
+author: "Alex Araya-Lobo"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collpased: true
+    toc_depth: 5
+    css: styles.css
+date: "Last edited `r format(Sys.time(), '%d %B %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE, cache.lazy = FALSE, warning = FALSE,
+                      message = FALSE, echo = TRUE, dpi = 180,
+                      fig.width = 7, fig.height = 4, fig.align = "center")
+
+
+#Load libraries needed for the analysis.
+library(tidyverse)
+library(tidymodels)
+library(ranger)
+library(vip)
+library(silgelib)
+theme_set(theme_plex())
+```
+
+The `bikes` dataset provides information about purchased bikes and characteristics about their buyers. Source: [Kaggle](https://www.kaggle.com/heeraldedhia/bike-buyers) ![](https://mspmag.com/downloads/49343/download/maininterior.jpg?cb=b9a06a219285e431ffa3348239987b95&w=1280)
+
+```{r}
+bikes <- read_csv("bike_buyers_clean.csv")
+head(bikes)
+```
+
+#### **Explore data**
+
+```{r}
+#Rename variables
+bikes <- 
+  bikes %>% 
+    rename_all(function(.name) {
+      .name %>% 
+        tolower %>%
+      str_replace(" ", "_") # replace all spaces with underscores
+    }) %>% select(-id) %>% mutate_if(is.character, as.factor) #Exclude id and change characters to factors.
+```
+
+Explore the distribution of the income variable.
+
+```{r}
+#bikes %>% count(purchased_bike) #Balanced data
+
+ggplot(bikes) +
+  geom_histogram(aes(x = income)) #Histogram, x = income.
+```
+
+#### **Build Model**
+
+##### Split data
+
+```{r}
+set.seed(234589) #Set a seed
+
+#Split data into training (75%) and testing(25%)
+bikes_split <- initial_split(bikes, strata = purchased_bike ,prop = 3/4)
+
+#Extract training and testing sets
+bikes_train <- training(bikes_split)
+bikes_test <- testing(bikes_split)
+
+#Create cross-validated version
+bikes_cv <- vfold_cv(bikes_train, strata = purchased_bike)
+```
+
+##### Prepare recipe
+
+```{r}
+bikes_recipe <-
+  recipe(purchased_bike ~., data = bikes_train) %>% #Set data and outcome
+  step_corr(all_numeric()) %>% #Remove correlated variables
+  step_dummy(all_nominal(), -all_outcomes()) %>% #Set dummy variables
+  step_normalize(all_numeric()) #Scale and center data
+
+bikes_train_preprocessed <- 
+  bikes_recipe %>%
+  prep(bikes_train) %>%
+  juice() #Finish the recipe and view the created data.
+
+```
+
+##### Specify model
+
+```{r}
+rf_model <- 
+  rand_forest() %>% #Random Forest Model
+  set_args(mtry = tune(), min_n = tune(), trees = 1000) %>% #Arguments to tune
+  set_mode("classification") %>% #Classification problem(not regression)
+  set_engine("ranger") #Library ranger
+```
+
+##### Workflow
+
+```{r}
+rf_workflow <-
+  workflow() %>%
+  add_recipe(bikes_recipe) %>% #Add recipe
+  add_model(rf_model) #Add model
+```
+
+##### Tune parameters
+
+```{r}
+rf_tune <-
+  rf_workflow %>% #Model + data pre-processed
+  tune_grid(resamples = bikes_cv, #Cross-validated object
+            grid = 9) #grid = number of candidate models that have different values of mtry and min_n
+```
+
+##### Finalize workflow
+
+Different metrics according to mtry and min_n.
+
+```{r}
+rf_tune %>%
+  collect_metrics() #View values of accuracy and roc_auc
+```
+
+New and final model with the best tuned values.
+
+```{r}
+param_final <- 
+  rf_tune %>%
+  select_best(metric = "roc_auc") #Select the best roc_auc
+
+final_rf <-
+  rf_model %>%
+  finalize_model(param_final) #Finalize model with the best tuned values. 
+final_rf
+```
+
+##### Variable importance
+
+It seems that the top 3 most important features are: - Age - Number of cars - Number of children These 3 variables had the most impact on explaining the purchased bikes classification.
+
+```{r}
+final_rf %>%
+  set_engine("ranger", importance = "permutation") %>% #Permutation method
+  fit(purchased_bike ~., data = bikes_train_preprocessed) %>%
+  vip(geom = "point") #Plot that shows the importance of the variables
+```
+
+##### Evaluate model
+
+The roc_auc with tuned parameters: 0.7652455.
+
+```{r}
+final_workflow <-
+  workflow() %>%
+  add_recipe(bikes_recipe) %>% #Same recipe
+  add_model(final_rf) #New model with the best values
+
+#Now that tuning is done, use last_fit
+#This function fits the final best model to the training set and evaluate the test set
+final_res <-
+  final_workflow %>%
+    last_fit(bikes_split) #Split object 
+
+final_res %>%
+  collect_metrics() #The metrics that collected are from the test set 
+```
+
+In here are classified the observations: correct-incorrect.
+
+```{r}
+test_predictions <-
+  final_res %>%
+    collect_predictions() %>%
+    mutate(correct = case_when(purchased_bike == .pred_class ~ "Correct",
+                               TRUE ~ "Incorrect")) #New column
+test_predictions #Predictions on the test set
+```
+
+Confusion matrix on testing data, another way to evaluate the model.
+
+```{r}
+test_predictions %>%
+  conf_mat(truth = purchased_bike, estimate = .pred_class) #Confusion matrix on testing data
+```
+
+```{r}
+test_predictions %>%
+  ggplot() +
+  geom_density(aes(x = .pred_Yes, fill = purchased_bike), 
+               alpha = 0.5)
+```
+
+##### Use model with new values
+
+```{r}
+final_model <- fit(rf_workflow, bikes)
+
+#names(bikes)
+new_bikes_data <-
+  tribble(~marital_status, ~gender, ~income, ~children, ~education, 
+          ~occupation, ~home_owner, ~cars, ~commute_distance,
+          ~region, ~age,
+          "Single", "Male", 45000, 0, "Bachelors", "Professional","No",
+          1,"5-10 Miles", "Pacific", 22) #Generate new data
+new_bikes_data
+```
+
+With this function we can predict new values, in order to classify future buyers.
+
+```{r}
+predict(final_model, new_data = new_bikes_data) #Predictions with new data
+```
+
+With more data and an improvement in computational power, we could improve the model's metrics. Also, we could try other models and compare them to each other. Tidymodels are an excellent, flexible and ideal approach to study these type of problems.
