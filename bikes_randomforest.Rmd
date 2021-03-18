@@ -152,7 +152,7 @@ final_rf %>%
 
 ##### Evaluate model
 
-The roc_auc with tuned parameters: 0.7652455.
+The roc_auc with tuned parameters: 0,7652455.
 
 ```{r}
 final_workflow <-
@@ -210,7 +210,7 @@ new_bikes_data <-
 new_bikes_data
 ```
 
-With this function we can predict new values, in order to classify future buyers.
+With this function we can predict new values, in order to classify future buyers, according to the same variables. 
 
 ```{r}
 predict(final_model, new_data = new_bikes_data) #Predictions with new data
